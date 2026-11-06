@@ -1,41 +1,45 @@
 # SftpBackgroundService
 
-A .NET 10 Worker Service that connects to an SFTP server once a day, downloads new files, and processes each
-one. It runs as a console app during development and as a Windows Service in production.
+A .NET 10 console app that connects to an SFTP server, downloads new files, processes each one, and exits.
+Windows Task Scheduler runs it once a day. Serilog writes a daily log file with 30-day retention.
 
-Inspired by the hosting and Windows Service setup from
-[.NET 10 Background Service with File Watcher](https://thomasngoswe.com/2026/03/07/dotnet-10-background-service-file-watcher/),
-with the `FileSystemWatcher` replaced by a daily scheduler plus an SFTP downloader. The post's
-Channels-based queue is intentionally left out: with one producer that fires once a day and one consumer it
-adds indirection without a payoff. Add it back if a second source of files appears.
+Inspired by the hosting setup from
+[.NET 10 Background Service with File Watcher](https://thomasngoswe.com/2026/03/07/dotnet-10-background-service-file-watcher/).
+The long-running Worker Service version with an in-process daily scheduler is kept on the `worker-service`
+branch; this branch is the simpler run-once shape.
 
 ## How it fits together
 
 ```
-SftpDownloadService (BackgroundService)
-  |  waits until Schedule:RunAt in Schedule:TimeZone (and optionally runs at startup)
+Windows Task Scheduler (daily at 02:00)
+  |
+  v
+SftpBackgroundService.exe  ->  SftpDownloadRunner.RunAsync
+  |
   v
 ISftpDownloader -> SftpDownloader (SSH.NET)
   |  lists Sftp:RemoteDirectory, matches Sftp:FilePattern,
   |  downloads to <LocalDownloadDirectory>/.staging/<name>.part, then moves into LocalDownloadDirectory
   v
 IFileProcessor -> LoggingFileProcessor   <-- replace this with your real processing
-     called once per downloaded file, in order, after the SFTP session has closed
+  |  called once per downloaded file, in order, after the SFTP session has closed
+  v
+exit code  (0 ok, 1 download failed, 2 some files failed processing, 3 startup/config error)
 ```
 
 | Folder | Contents |
 | --- | --- |
-| `src/SftpBackgroundService/Hosting` | `SftpDownloadService` (scheduler and orchestration) |
+| `src/SftpBackgroundService` | `Program.cs` entry point, `SftpDownloadRunner` orchestration and exit codes |
 | `src/SftpBackgroundService/Sftp` | `ISftpDownloader`, `SftpDownloader` |
 | `src/SftpBackgroundService/Processing` | `IFileProcessor`, `LoggingFileProcessor` placeholder |
-| `src/SftpBackgroundService/Scheduling` | `DailySchedule`, pure next-run arithmetic |
-| `src/SftpBackgroundService/Options` | `SftpOptions`, `ScheduleOptions`, validators |
-| `tests/SftpBackgroundService.Tests` | xUnit tests (scheduler arithmetic, service loop) |
+| `src/SftpBackgroundService/Options` | `SftpOptions` and its validator |
+| `deploy` | `Register-SftpDownloadTask.ps1`, creates or removes the Task Scheduler task |
+| `tests/SftpBackgroundService.Tests` | xUnit tests for the runner |
 
 ## Configuration
 
-All settings live in `appsettings.json` and can be overridden per environment, by environment variables
-(`Sftp__Password`), or by user-secrets.
+All settings live in `appsettings.json` and can be overridden by environment variables (`Sftp__Password`),
+by `appsettings.Production.json`, or by user-secrets during development.
 
 ```json
 "Sftp": {
@@ -52,21 +56,22 @@ All settings live in `appsettings.json` and can be overridden per environment, b
   "SkipIfLocalExists": true,
   "DeleteRemoteAfterDownload": false,
   "ConnectTimeoutSeconds": 30
-},
-"Schedule": {
-  "RunAt": "02:00",                 // time of day
-  "TimeZone": "Local",              // "Local", "UTC", or a system zone id
-  "RunOnStartup": false             // appsettings.Development.json sets this to true
 }
 ```
 
-Either `Password` or `PrivateKeyPath` is required. Config is validated at startup; the host refuses to start
-with a clear message if something is missing.
+Either `Password` or `PrivateKeyPath` is required. Bad or missing configuration is logged as Fatal and the
+process exits with code 3 before touching the network.
 
 Keep secrets out of `appsettings.json`:
 
 ```bash
 dotnet user-secrets set "Sftp:Password" "your-password" --project src/SftpBackgroundService
+```
+
+Get the server's host key fingerprint so the app refuses to talk to an impostor:
+
+```bash
+ssh-keyscan sftp.example.com 2>/dev/null | ssh-keygen -lf -
 ```
 
 ## Run locally
@@ -75,7 +80,8 @@ dotnet user-secrets set "Sftp:Password" "your-password" --project src/SftpBackgr
 dotnet run --project src/SftpBackgroundService --environment Development
 ```
 
-Development turns on `RunOnStartup`, so you see a download attempt immediately instead of waiting for 02:00.
+One run, then it exits. Development raises the log level to Debug. The exit code is in `$LASTEXITCODE`
+(PowerShell) or `$?` (bash).
 
 ## Test
 
@@ -91,59 +97,81 @@ Implement `IFileProcessor` and swap the registration in `Program.cs`:
 builder.Services.AddSingleton<IFileProcessor, MyCsvImporter>();
 ```
 
-`ProcessAsync` is called by the scheduler one file at a time, in download order, after the SFTP connection
-has been closed. Files are already complete on disk when it is called. If it throws, the error is logged and
-the remaining files are still processed.
+`ProcessAsync` is called once per downloaded file, in order, after the SFTP connection has been closed.
+Files are complete on disk when it is called. If it throws, the error is logged, the remaining files are
+still processed, and the run exits with code 2.
 
-## Install as a Windows Service
+## Deploy with Task Scheduler
+
+**1. Publish** a self-contained single executable:
 
 ```bash
 dotnet publish src/SftpBackgroundService -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o ./publish
 ```
 
-Then from an elevated prompt (the space after `binpath=` is required):
+Copy the `publish` folder to the server, for example `C:\Services\SftpBackgroundService`.
 
-```bash
-sc.exe create "SftpBackgroundService" binpath= "C:\path\to\publish\SftpBackgroundService.exe" start= auto
+**2. Configure.** Put the real host, path, and fingerprint in an `appsettings.Production.json` next to the exe,
+and the password in a machine-scope environment variable so it is never on disk in plain text:
+
+```powershell
+[Environment]::SetEnvironmentVariable("Sftp__Password", "the-real-password", "Machine")
 ```
 
-```bash
-sc.exe start "SftpBackgroundService"
+**3. Register the task** from an elevated PowerShell:
+
+```powershell
+.\deploy\Register-SftpDownloadTask.ps1 -ExePath "C:\Services\SftpBackgroundService\SftpBackgroundService.exe"
 ```
 
-```bash
-sc.exe stop "SftpBackgroundService"
+Add `-At "03:30"` for a different time or `-User "DOMAIN\svc_sftp"` to run as a dedicated account (you are
+prompted for its password). The task is created with:
+
+- **Start when available**: a run missed because the server was off happens as soon as it is back on.
+- **Retry** up to 3 times, 15 minutes apart, when the exit code is non-zero.
+- **Ignore new instance** if the previous run is still going.
+- **2 hour execution limit** so a hung connection cannot run forever.
+
+**4. Verify** by running it once by hand and checking the result:
+
+```powershell
+Start-ScheduledTask -TaskName "SFTP Daily Download"
 ```
 
-```bash
-sc.exe delete "SftpBackgroundService"
+```powershell
+(Get-ScheduledTaskInfo -TaskName "SFTP Daily Download").LastTaskResult
+```
+
+`0` is success. Anything else maps to the exit codes above, and the log file has the details.
+
+**Updating:** overwrite the publish folder. Nothing is locked between runs, so no stop/start is needed.
+
+**Removing:**
+
+```powershell
+.\deploy\Register-SftpDownloadTask.ps1 -Unregister
 ```
 
 ## Logging
 
 Logging is Serilog, configured entirely from the `Serilog` section of `appsettings.json`.
 
-- **Console sink** for `dotnet run`.
-- **File sink** at `logs/sftp-service-YYYYMMDD.log` next to the executable. One file per day, rolled again at
+- **Console sink** for `dotnet run` and for Task Scheduler's own history view.
+- **File sink** at `logs/sftp-download-YYYYMMDD.log` next to the executable. One file per day, rolled again at
   100 MB, and **files older than 30 days are deleted automatically** (`retainedFileTimeLimit`).
 
 `Program.cs` sets the working directory to the exe folder on startup, so the relative `logs/` path lands beside
-the binary whether you run from the console or as a Windows Service (where the default working directory is
-`System32`). To put logs somewhere else, change `path` to an absolute value such as
-`D:/Logs/SftpBackgroundService/sftp-service-.log`.
+the binary regardless of the working directory Task Scheduler starts the process with. To put logs somewhere
+else, change `path` to an absolute value such as `D:/Logs/SftpDownload/sftp-download-.log`.
 
-`appsettings.Development.json` raises the minimum level to `Debug`, which adds per-file skip decisions and
-remote delete confirmations. Production stays at `Information` with Microsoft framework noise capped at
-`Warning`.
-
-Startup failures (bad config, missing credentials) are written through a bootstrap logger before the host is
-built, so they reach the console even when the main configuration cannot load. The host exits with code 1.
+Startup failures are written through a bootstrap logger before the host is built, so they reach the console
+even when the main configuration cannot load.
 
 ## Behaviour notes
 
-- A failed download run is logged and the service waits for the next scheduled time. It does not crash.
 - Files are downloaded to a `.staging` subfolder and moved into place atomically, so a crash mid-transfer never
   leaves a partial file in the download folder.
 - `SkipIfLocalExists` is the only de-duplication. If you need to re-process, delete the local copy or set it
   to `false`.
-- Without `HostKeyFingerprint` the first server key is trusted and a warning is logged on every connection.
+- Without `HostKeyFingerprint` the first server key is trusted and a warning is logged on every run.
+- Not Windows? The same exe (published with `-r linux-x64`) runs from cron: `0 2 * * * /opt/sftp/SftpBackgroundService`.

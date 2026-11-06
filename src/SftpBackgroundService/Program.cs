@@ -1,10 +1,10 @@
 using Serilog;
-using SftpBackgroundService.Hosting;
+using SftpBackgroundService;
 using SftpBackgroundService.Options;
 using SftpBackgroundService.Processing;
 using SftpBackgroundService.Sftp;
 
-// When hosted as a Windows Service the working directory is System32. Anchor it to the exe folder so
+// Task Scheduler starts the process with an arbitrary working directory. Anchor it to the exe folder so
 // appsettings.json and the relative "logs/" path in the Serilog config resolve next to the binary.
 Directory.SetCurrentDirectory(AppContext.BaseDirectory);
 
@@ -17,40 +17,48 @@ try
 {
     var builder = Host.CreateApplicationBuilder(args);
 
-    // Replace the default Microsoft.Extensions.Logging providers with Serilog, configured from the "Serilog" section.
     builder.Services.AddSerilog((services, loggerConfiguration) => loggerConfiguration
         .ReadFrom.Configuration(builder.Configuration)
         .ReadFrom.Services(services)
         .Enrich.FromLogContext());
 
-    // Lets the same binary run as a console app (dotnet run) or as a Windows Service (sc.exe).
-    builder.Services.AddWindowsService(options => options.ServiceName = "SftpBackgroundService");
-
     builder.Services.AddOptions<SftpOptions>()
         .BindConfiguration(SftpOptions.SectionName)
-        .ValidateDataAnnotations()
-        .ValidateOnStart();
+        .ValidateDataAnnotations();
     builder.Services.AddSingleton<IValidateOptions<SftpOptions>, SftpOptionsValidator>();
 
-    builder.Services.AddOptions<ScheduleOptions>()
-        .BindConfiguration(ScheduleOptions.SectionName)
-        .ValidateDataAnnotations()
-        .ValidateOnStart();
-
-    builder.Services.AddSingleton(TimeProvider.System);
     builder.Services.AddSingleton<ISftpDownloader, SftpDownloader>();
     builder.Services.AddSingleton<IFileProcessor, LoggingFileProcessor>();
+    builder.Services.AddSingleton<SftpDownloadRunner>();
 
-    builder.Services.AddHostedService<SftpDownloadService>();
+    // The host is used only as a container for configuration, logging and DI. It is never started:
+    // this process does one run and exits, and Task Scheduler decides when the next run happens.
+    using var host = builder.Build();
 
-    var host = builder.Build();
-    host.Run();
-    return 0;
+    // Options are validated lazily on first access. Touch them here so a bad config exits with
+    // StartupFailed (3) instead of surfacing inside the run as a download failure (1).
+    _ = host.Services.GetRequiredService<IOptions<SftpOptions>>().Value;
+
+    using var cts = new CancellationTokenSource();
+    Console.CancelKeyPress += (_, e) =>
+    {
+        e.Cancel = true;
+        cts.Cancel();
+    };
+
+    var runner = host.Services.GetRequiredService<SftpDownloadRunner>();
+    return await runner.RunAsync(cts.Token);
+}
+catch (OperationCanceledException)
+{
+    Log.Warning("Run cancelled.");
+    return ExitCodes.StartupFailed;
 }
 catch (Exception ex)
 {
-    Log.Fatal(ex, "Host terminated unexpectedly");
-    return 1;
+    // Includes OptionsValidationException for bad or missing configuration.
+    Log.Fatal(ex, "Run aborted before it could start.");
+    return ExitCodes.StartupFailed;
 }
 finally
 {
