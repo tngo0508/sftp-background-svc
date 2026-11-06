@@ -123,8 +123,25 @@ sc.exe stop "SftpBackgroundService"
 sc.exe delete "SftpBackgroundService"
 ```
 
-Logs go to the Windows Event Log (source `SftpBackgroundService`) when running as a service, and to the
-console when run with `dotnet run`.
+## Logging
+
+Logging is Serilog, configured entirely from the `Serilog` section of `appsettings.json`.
+
+- **Console sink** for `dotnet run`.
+- **File sink** at `logs/sftp-service-YYYYMMDD.log` next to the executable. One file per day, rolled again at
+  100 MB, and **files older than 30 days are deleted automatically** (`retainedFileTimeLimit`).
+
+`Program.cs` sets the working directory to the exe folder on startup, so the relative `logs/` path lands beside
+the binary whether you run from the console or as a Windows Service (where the default working directory is
+`System32`). To put logs somewhere else, change `path` to an absolute value such as
+`D:/Logs/SftpBackgroundService/sftp-service-.log`.
+
+`appsettings.Development.json` raises the minimum level to `Debug`, which adds per-file skip decisions and
+remote delete confirmations. Production stays at `Information` with Microsoft framework noise capped at
+`Warning`.
+
+Startup failures (bad config, missing credentials) are written through a bootstrap logger before the host is
+built, so they reach the console even when the main configuration cannot load. The host exits with code 1.
 
 ## Behaviour notes
 
