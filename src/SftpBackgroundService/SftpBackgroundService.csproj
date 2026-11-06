@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk.Worker">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UserSecretsId>dotnet-SftpBackgroundService-54dc73a4-478b-4c1a-9b08-63c7dec0d554</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.14" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.14" />
+    <PackageReference Include="Microsoft.Extensions.Options.DataAnnotations" Version="10.0.14" />
+    <PackageReference Include="SSH.NET" Version="2026.0.0" />
+  </ItemGroup>
+</Project>

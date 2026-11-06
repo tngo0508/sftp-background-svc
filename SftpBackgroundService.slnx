@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/SftpBackgroundService/SftpBackgroundService.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/SftpBackgroundService.Tests/SftpBackgroundService.Tests.csproj" />
+  </Folder>
+</Solution>

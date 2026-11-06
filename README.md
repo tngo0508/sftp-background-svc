@@ -1,0 +1,136 @@
+# SftpBackgroundService
+
+A .NET 10 Worker Service that connects to an SFTP server once a day, downloads new files, and hands each
+file to a background queue for processing. It runs as a console app during development and as a Windows
+Service in production.
+
+Based on the queue/consumer pattern from
+[.NET 10 Background Service with File Watcher](https://thomasngoswe.com/2026/03/07/dotnet-10-background-service-file-watcher/),
+with the `FileSystemWatcher` replaced by a daily scheduler plus an SFTP downloader.
+
+## How it fits together
+
+```
+SftpDownloadService (BackgroundService)
+  |  waits until Schedule:RunAt in Schedule:TimeZone (and optionally runs at startup)
+  v
+ISftpDownloader -> SftpDownloader (SSH.NET)
+  |  lists Sftp:RemoteDirectory, matches Sftp:FilePattern,
+  |  downloads to <LocalDownloadDirectory>/.staging/<name>.part, then moves into LocalDownloadDirectory
+  v
+IBackgroundTaskQueue (bounded System.Threading.Channels queue, capacity 100)
+  |
+  v
+QueuedHostedService (BackgroundService, single consumer)
+  |
+  v
+IFileProcessor -> LoggingFileProcessor   <-- replace this with your real processing
+```
+
+| Folder | Contents |
+| --- | --- |
+| `src/SftpBackgroundService/Hosting` | `SftpDownloadService` (scheduler), `QueuedHostedService` (queue consumer) |
+| `src/SftpBackgroundService/Sftp` | `ISftpDownloader`, `SftpDownloader` |
+| `src/SftpBackgroundService/Queue` | `IBackgroundTaskQueue`, `DefaultBackgroundTaskQueue` |
+| `src/SftpBackgroundService/Processing` | `IFileProcessor`, `LoggingFileProcessor` placeholder |
+| `src/SftpBackgroundService/Scheduling` | `DailySchedule`, pure next-run arithmetic |
+| `src/SftpBackgroundService/Options` | `SftpOptions`, `ScheduleOptions`, validators |
+| `tests/SftpBackgroundService.Tests` | xUnit tests (scheduler, queue, service loop) |
+
+## Configuration
+
+All settings live in `appsettings.json` and can be overridden per environment, by environment variables
+(`Sftp__Password`), or by user-secrets.
+
+```json
+"Sftp": {
+  "Host": "sftp.example.com",
+  "Port": 22,
+  "Username": "svc_user",
+  "Password": null,                 // or
+  "PrivateKeyPath": null,           // path to an OpenSSH/PEM key
+  "PrivateKeyPassphrase": null,
+  "HostKeyFingerprint": null,       // "SHA256:..." from ssh-keygen -lf; strongly recommended in prod
+  "RemoteDirectory": "/outbound",
+  "FilePattern": "*.csv",
+  "LocalDownloadDirectory": "C:/Temp/SftpDownloads",   // forward slashes avoid JSON escaping
+  "SkipIfLocalExists": true,
+  "DeleteRemoteAfterDownload": false,
+  "ConnectTimeoutSeconds": 30
+},
+"Schedule": {
+  "RunAt": "02:00",                 // time of day
+  "TimeZone": "Local",              // "Local", "UTC", or a system zone id
+  "RunOnStartup": false             // appsettings.Development.json sets this to true
+}
+```
+
+Either `Password` or `PrivateKeyPath` is required. Config is validated at startup; the host refuses to start
+with a clear message if something is missing.
+
+Keep secrets out of `appsettings.json`:
+
+```bash
+dotnet user-secrets set "Sftp:Password" "your-password" --project src/SftpBackgroundService
+```
+
+## Run locally
+
+```bash
+dotnet run --project src/SftpBackgroundService --environment Development
+```
+
+Development turns on `RunOnStartup`, so you see a download attempt immediately instead of waiting for 02:00.
+
+## Test
+
+```bash
+dotnet test
+```
+
+## Add your processing logic
+
+Implement `IFileProcessor` and swap the registration in `Program.cs`:
+
+```csharp
+builder.Services.AddSingleton<IFileProcessor, MyCsvImporter>();
+```
+
+`ProcessAsync` runs on the single queue consumer, one file at a time, in download order. Files are already
+complete on disk when it is called.
+
+## Install as a Windows Service
+
+```bash
+dotnet publish src/SftpBackgroundService -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o ./publish
+```
+
+Then from an elevated prompt (the space after `binpath=` is required):
+
+```bash
+sc.exe create "SftpBackgroundService" binpath= "C:\path\to\publish\SftpBackgroundService.exe" start= auto
+```
+
+```bash
+sc.exe start "SftpBackgroundService"
+```
+
+```bash
+sc.exe stop "SftpBackgroundService"
+```
+
+```bash
+sc.exe delete "SftpBackgroundService"
+```
+
+Logs go to the Windows Event Log (source `SftpBackgroundService`) when running as a service, and to the
+console when run with `dotnet run`.
+
+## Behaviour notes
+
+- A failed download run is logged and the service waits for the next scheduled time. It does not crash.
+- Files are downloaded to a `.staging` subfolder and moved into place atomically, so a crash mid-transfer never
+  leaves a partial file in the download folder.
+- `SkipIfLocalExists` is the only de-duplication. If you need to re-process, delete the local copy or set it
+  to `false`.
+- Without `HostKeyFingerprint` the first server key is trusted and a warning is logged on every connection.
