@@ -2,7 +2,6 @@ using Serilog;
 using SftpBackgroundService.Hosting;
 using SftpBackgroundService.Options;
 using SftpBackgroundService.Processing;
-using SftpBackgroundService.Queue;
 using SftpBackgroundService.Sftp;
 
 // When hosted as a Windows Service the working directory is System32. Anchor it to the exe folder so
@@ -39,12 +38,9 @@ try
         .ValidateOnStart();
 
     builder.Services.AddSingleton(TimeProvider.System);
-    builder.Services.AddSingleton<IBackgroundTaskQueue>(new DefaultBackgroundTaskQueue(capacity: 100));
     builder.Services.AddSingleton<ISftpDownloader, SftpDownloader>();
     builder.Services.AddSingleton<IFileProcessor, LoggingFileProcessor>();
 
-    // Consumer first so the queue is being drained before the scheduler can enqueue anything.
-    builder.Services.AddHostedService<QueuedHostedService>();
     builder.Services.AddHostedService<SftpDownloadService>();
 
     var host = builder.Build();

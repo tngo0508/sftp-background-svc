@@ -1,6 +1,5 @@
 using SftpBackgroundService.Options;
 using SftpBackgroundService.Processing;
-using SftpBackgroundService.Queue;
 using SftpBackgroundService.Scheduling;
 using SftpBackgroundService.Sftp;
 
@@ -8,11 +7,10 @@ namespace SftpBackgroundService.Hosting;
 
 /// <summary>
 /// Runs the SFTP download once per day at the configured time (and optionally once at startup),
-/// then hands each downloaded file to the background queue for processing.
+/// then processes each downloaded file in order.
 /// </summary>
 public sealed class SftpDownloadService(
     ISftpDownloader downloader,
-    IBackgroundTaskQueue taskQueue,
     IFileProcessor fileProcessor,
     IOptions<ScheduleOptions> scheduleOptions,
     TimeProvider timeProvider,
@@ -52,19 +50,11 @@ public sealed class SftpDownloadService(
     private async Task RunOnceAsync(CancellationToken cancellationToken)
     {
         logger.LogInformation("Starting SFTP download run.");
+
+        SftpDownloadResult result;
         try
         {
-            var result = await downloader.DownloadNewFilesAsync(cancellationToken);
-            logger.LogInformation(
-                "SFTP download run finished. Downloaded {Downloaded}, skipped {Skipped}.",
-                result.DownloadedFiles.Count,
-                result.Skipped);
-
-            foreach (var file in result.DownloadedFiles)
-            {
-                await taskQueue.QueueBackgroundWorkItemAsync(
-                    token => new ValueTask(fileProcessor.ProcessAsync(file, token)));
-            }
+            result = await downloader.DownloadNewFilesAsync(cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -74,6 +64,35 @@ public sealed class SftpDownloadService(
         {
             // A failed run must not kill the service; the next scheduled run will retry.
             logger.LogError(ex, "SFTP download run failed.");
+            return;
+        }
+
+        logger.LogInformation(
+            "SFTP download run finished. Downloaded {Downloaded}, skipped {Skipped}.",
+            result.DownloadedFiles.Count,
+            result.Skipped);
+
+        // The SFTP session is already closed at this point, so slow processing never holds a connection open.
+        foreach (var file in result.DownloadedFiles)
+        {
+            await ProcessFileAsync(file, cancellationToken);
+        }
+    }
+
+    private async Task ProcessFileAsync(string file, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await fileProcessor.ProcessAsync(file, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // One bad file must not stop the remaining files from being processed.
+            logger.LogError(ex, "Processing {File} failed.", file);
         }
     }
 }

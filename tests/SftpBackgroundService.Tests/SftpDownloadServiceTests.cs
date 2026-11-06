@@ -4,7 +4,6 @@ using NSubstitute;
 using SftpBackgroundService.Hosting;
 using SftpBackgroundService.Options;
 using SftpBackgroundService.Processing;
-using SftpBackgroundService.Queue;
 using SftpBackgroundService.Sftp;
 
 namespace SftpBackgroundService.Tests;
@@ -54,26 +53,52 @@ public class SftpDownloadServiceTests
     }
 
     [Fact]
-    public async Task DownloadedFiles_AreQueuedForProcessing()
+    public async Task DownloadedFiles_AreProcessedInOrder()
     {
         var downloader = Substitute.For<ISftpDownloader>();
         downloader.DownloadNewFilesAsync(Arg.Any<CancellationToken>())
             .Returns(new SftpDownloadResult([@"C:\in\a.csv", @"C:\in\b.csv"], 0));
+        var processed = new List<string>();
+        var allProcessed = new TaskCompletionSource();
         var processor = Substitute.For<IFileProcessor>();
-        var queue = new DefaultBackgroundTaskQueue(capacity: 10);
+        processor.ProcessAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(call =>
+            {
+                processed.Add(call.Arg<string>());
+                if (processed.Count == 2) allProcessed.TrySetResult();
+                return Task.CompletedTask;
+            });
         var clock = new FakeTimeProvider(new DateTimeOffset(2026, 11, 6, 12, 0, 0, TimeSpan.Zero));
-        var service = CreateService(downloader, clock, runOnStartup: true, queue, processor);
+        var service = CreateService(downloader, clock, runOnStartup: true, processor);
 
         await service.StartAsync(CancellationToken.None);
-        await Task.Yield();
-
-        // Drain the queue the way QueuedHostedService would.
-        await (await queue.DequeueAsync(CancellationToken.None))(CancellationToken.None);
-        await (await queue.DequeueAsync(CancellationToken.None))(CancellationToken.None);
+        await allProcessed.Task.WaitAsync(TimeSpan.FromSeconds(5));
         await service.StopAsync(CancellationToken.None);
 
-        await processor.Received(1).ProcessAsync(@"C:\in\a.csv", Arg.Any<CancellationToken>());
-        await processor.Received(1).ProcessAsync(@"C:\in\b.csv", Arg.Any<CancellationToken>());
+        Assert.Equal([@"C:\in\a.csv", @"C:\in\b.csv"], processed);
+    }
+
+    [Fact]
+    public async Task ProcessingFailure_DoesNotSkipRemainingFiles()
+    {
+        var downloader = Substitute.For<ISftpDownloader>();
+        downloader.DownloadNewFilesAsync(Arg.Any<CancellationToken>())
+            .Returns(new SftpDownloadResult([@"C:\in\bad.csv", @"C:\in\good.csv"], 0));
+        var goodProcessed = new TaskCompletionSource();
+        var processor = Substitute.For<IFileProcessor>();
+        processor.ProcessAsync(@"C:\in\bad.csv", Arg.Any<CancellationToken>())
+            .Returns<Task>(_ => throw new InvalidOperationException("corrupt"));
+        processor.ProcessAsync(@"C:\in\good.csv", Arg.Any<CancellationToken>())
+            .Returns(_ => { goodProcessed.TrySetResult(); return Task.CompletedTask; });
+        var clock = new FakeTimeProvider(new DateTimeOffset(2026, 11, 6, 12, 0, 0, TimeSpan.Zero));
+        var service = CreateService(downloader, clock, runOnStartup: true, processor);
+
+        await service.StartAsync(CancellationToken.None);
+        await goodProcessed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.NotNull(service.ExecuteTask);
+        Assert.False(service.ExecuteTask.IsCompleted, "service loop should still be waiting for the next run");
+        await service.StopAsync(CancellationToken.None);
     }
 
     [Fact]
@@ -97,13 +122,11 @@ public class SftpDownloadServiceTests
         ISftpDownloader downloader,
         TimeProvider clock,
         bool runOnStartup,
-        IBackgroundTaskQueue? queue = null,
         IFileProcessor? processor = null)
     {
         var schedule = new ScheduleOptions { RunAt = new TimeOnly(2, 0), TimeZone = "UTC", RunOnStartup = runOnStartup };
         return new SftpDownloadService(
             downloader,
-            queue ?? new DefaultBackgroundTaskQueue(capacity: 10),
             processor ?? Substitute.For<IFileProcessor>(),
             Microsoft.Extensions.Options.Options.Create(schedule),
             clock,

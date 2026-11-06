@@ -1,12 +1,13 @@
 # SftpBackgroundService
 
-A .NET 10 Worker Service that connects to an SFTP server once a day, downloads new files, and hands each
-file to a background queue for processing. It runs as a console app during development and as a Windows
-Service in production.
+A .NET 10 Worker Service that connects to an SFTP server once a day, downloads new files, and processes each
+one. It runs as a console app during development and as a Windows Service in production.
 
-Based on the queue/consumer pattern from
+Inspired by the hosting and Windows Service setup from
 [.NET 10 Background Service with File Watcher](https://thomasngoswe.com/2026/03/07/dotnet-10-background-service-file-watcher/),
-with the `FileSystemWatcher` replaced by a daily scheduler plus an SFTP downloader.
+with the `FileSystemWatcher` replaced by a daily scheduler plus an SFTP downloader. The post's
+Channels-based queue is intentionally left out: with one producer that fires once a day and one consumer it
+adds indirection without a payoff. Add it back if a second source of files appears.
 
 ## How it fits together
 
@@ -18,24 +19,18 @@ ISftpDownloader -> SftpDownloader (SSH.NET)
   |  lists Sftp:RemoteDirectory, matches Sftp:FilePattern,
   |  downloads to <LocalDownloadDirectory>/.staging/<name>.part, then moves into LocalDownloadDirectory
   v
-IBackgroundTaskQueue (bounded System.Threading.Channels queue, capacity 100)
-  |
-  v
-QueuedHostedService (BackgroundService, single consumer)
-  |
-  v
 IFileProcessor -> LoggingFileProcessor   <-- replace this with your real processing
+     called once per downloaded file, in order, after the SFTP session has closed
 ```
 
 | Folder | Contents |
 | --- | --- |
-| `src/SftpBackgroundService/Hosting` | `SftpDownloadService` (scheduler), `QueuedHostedService` (queue consumer) |
+| `src/SftpBackgroundService/Hosting` | `SftpDownloadService` (scheduler and orchestration) |
 | `src/SftpBackgroundService/Sftp` | `ISftpDownloader`, `SftpDownloader` |
-| `src/SftpBackgroundService/Queue` | `IBackgroundTaskQueue`, `DefaultBackgroundTaskQueue` |
 | `src/SftpBackgroundService/Processing` | `IFileProcessor`, `LoggingFileProcessor` placeholder |
 | `src/SftpBackgroundService/Scheduling` | `DailySchedule`, pure next-run arithmetic |
 | `src/SftpBackgroundService/Options` | `SftpOptions`, `ScheduleOptions`, validators |
-| `tests/SftpBackgroundService.Tests` | xUnit tests (scheduler, queue, service loop) |
+| `tests/SftpBackgroundService.Tests` | xUnit tests (scheduler arithmetic, service loop) |
 
 ## Configuration
 
@@ -96,8 +91,9 @@ Implement `IFileProcessor` and swap the registration in `Program.cs`:
 builder.Services.AddSingleton<IFileProcessor, MyCsvImporter>();
 ```
 
-`ProcessAsync` runs on the single queue consumer, one file at a time, in download order. Files are already
-complete on disk when it is called.
+`ProcessAsync` is called by the scheduler one file at a time, in download order, after the SFTP connection
+has been closed. Files are already complete on disk when it is called. If it throws, the error is logged and
+the remaining files are still processed.
 
 ## Install as a Windows Service
 
