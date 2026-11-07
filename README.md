@@ -129,7 +129,9 @@ Add `-At "03:30"` for a different time or `-User "DOMAIN\svc_sftp"` to run as a 
 prompted for its password). The task is created with:
 
 - **Start when available**: a run missed because the server was off happens as soon as it is back on.
-- **Retry** up to 3 times, 15 minutes apart, when the exit code is non-zero.
+- **Restart on launch failure** up to 3 times, 15 minutes apart. This only covers the task failing to start
+  (for example the exe missing or the account unable to log on). A non-zero exit code is recorded as the
+  last run result but is not retried; the next scheduled run picks the failed files up again.
 - **Ignore new instance** if the previous run is still going.
 - **2 hour execution limit** so a hung connection cannot run forever.
 

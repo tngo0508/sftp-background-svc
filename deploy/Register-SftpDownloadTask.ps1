@@ -78,7 +78,8 @@ $settings = New-ScheduledTaskSettingsSet `
     -DontStopIfGoingOnBatteries
 
 # -StartWhenAvailable: if the server was off at the scheduled time, run as soon as it is back.
-# -RestartCount/-RestartInterval: retry a failed run (non-zero exit code) up to 3 times, 15 minutes apart.
+# -RestartCount/-RestartInterval: restart if the task fails to LAUNCH (exe missing, logon failure), up to 3 times,
+#   15 minutes apart. Task Scheduler does not retry on a non-zero exit code; that is left to the next daily run.
 # -MultipleInstances IgnoreNew: never run two downloads at once.
 
 $registerArgs = @{
