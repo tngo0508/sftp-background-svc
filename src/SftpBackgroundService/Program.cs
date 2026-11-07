@@ -52,7 +52,7 @@ try
 catch (OperationCanceledException)
 {
     Log.Warning("Run cancelled.");
-    return ExitCodes.StartupFailed;
+    return ExitCodes.Cancelled;
 }
 catch (Exception ex)
 {

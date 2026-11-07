@@ -7,9 +7,13 @@ namespace SftpBackgroundService;
 public static class ExitCodes
 {
     public const int Success = 0;
+
+    /// <summary>The connection or listing failed, or at least one file could not be downloaded.</summary>
     public const int DownloadFailed = 1;
+
     public const int SomeFilesFailedProcessing = 2;
     public const int StartupFailed = 3;
+    public const int Cancelled = 4;
 }
 
 /// <summary>
@@ -41,12 +45,15 @@ public sealed class SftpDownloadRunner(
         }
 
         logger.LogInformation(
-            "Download finished. Downloaded {Downloaded}, skipped {Skipped}.",
+            "Download finished. Downloaded {Downloaded}, skipped {Skipped}, failed {Failed}.",
             result.DownloadedFiles.Count,
-            result.Skipped);
+            result.SkippedCount,
+            result.FailedCount);
 
+        // Files that did land are always processed, even when other downloads failed. Otherwise they would
+        // sit in the download folder and be skipped as "already present" on every later run.
         // The SFTP session is already closed here, so slow processing never holds a connection open.
-        var failed = 0;
+        var failedProcessing = 0;
         foreach (var file in result.DownloadedFiles)
         {
             try
@@ -60,15 +67,22 @@ public sealed class SftpDownloadRunner(
             catch (Exception ex)
             {
                 // One bad file must not stop the remaining files from being processed.
-                failed++;
+                failedProcessing++;
                 logger.LogError(ex, "Processing {File} failed.", file);
             }
         }
 
-        if (failed > 0)
+        if (result.FailedCount > 0)
+        {
+            logger.LogWarning("Run finished with {Failed} download(s) failing; they will be retried on the next run.",
+                result.FailedCount);
+            return ExitCodes.DownloadFailed;
+        }
+
+        if (failedProcessing > 0)
         {
             logger.LogWarning("Run finished with {Failed} of {Total} files failing to process.",
-                failed, result.DownloadedFiles.Count);
+                failedProcessing, result.DownloadedFiles.Count);
             return ExitCodes.SomeFilesFailedProcessing;
         }
 

@@ -12,7 +12,7 @@ public class SftpDownloadRunnerTests
     {
         var downloader = Substitute.For<ISftpDownloader>();
         downloader.DownloadNewFilesAsync(Arg.Any<CancellationToken>())
-            .Returns(new SftpDownloadResult([@"C:\in\a.csv", @"C:\in\b.csv"], 1));
+            .Returns(new SftpDownloadResult([@"C:\in\a.csv", @"C:\in\b.csv"], SkippedCount: 1, FailedCount: 0));
         var processed = new List<string>();
         var processor = Substitute.For<IFileProcessor>();
         processor.ProcessAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
@@ -29,7 +29,7 @@ public class SftpDownloadRunnerTests
     {
         var downloader = Substitute.For<ISftpDownloader>();
         downloader.DownloadNewFilesAsync(Arg.Any<CancellationToken>())
-            .Returns(new SftpDownloadResult([], 3));
+            .Returns(new SftpDownloadResult([], SkippedCount: 3, FailedCount: 0));
         var processor = Substitute.For<IFileProcessor>();
 
         var exitCode = await CreateRunner(downloader, processor).RunAsync(CancellationToken.None);
@@ -39,7 +39,7 @@ public class SftpDownloadRunnerTests
     }
 
     [Fact]
-    public async Task DownloadFailure_ReturnsOne_AndSkipsProcessing()
+    public async Task ConnectionFailure_ReturnsOne_AndSkipsProcessing()
     {
         var downloader = Substitute.For<ISftpDownloader>();
         downloader.DownloadNewFilesAsync(Arg.Any<CancellationToken>())
@@ -53,11 +53,26 @@ public class SftpDownloadRunnerTests
     }
 
     [Fact]
+    public async Task PartialDownloadFailure_StillProcessesLandedFiles_AndReturnsOne()
+    {
+        // Files that landed must be processed now; with SkipIfLocalExists they would never be seen again.
+        var downloader = Substitute.For<ISftpDownloader>();
+        downloader.DownloadNewFilesAsync(Arg.Any<CancellationToken>())
+            .Returns(new SftpDownloadResult([@"C:\in\a.csv"], SkippedCount: 0, FailedCount: 1));
+        var processor = Substitute.For<IFileProcessor>();
+
+        var exitCode = await CreateRunner(downloader, processor).RunAsync(CancellationToken.None);
+
+        Assert.Equal(ExitCodes.DownloadFailed, exitCode);
+        await processor.Received(1).ProcessAsync(@"C:\in\a.csv", Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
     public async Task ProcessingFailure_StillProcessesRemainingFiles_AndReturnsTwo()
     {
         var downloader = Substitute.For<ISftpDownloader>();
         downloader.DownloadNewFilesAsync(Arg.Any<CancellationToken>())
-            .Returns(new SftpDownloadResult([@"C:\in\bad.csv", @"C:\in\good.csv"], 0));
+            .Returns(new SftpDownloadResult([@"C:\in\bad.csv", @"C:\in\good.csv"], SkippedCount: 0, FailedCount: 0));
         var processor = Substitute.For<IFileProcessor>();
         processor.ProcessAsync(@"C:\in\bad.csv", Arg.Any<CancellationToken>())
             .Returns<Task>(_ => throw new InvalidOperationException("corrupt"));
@@ -66,6 +81,21 @@ public class SftpDownloadRunnerTests
 
         Assert.Equal(ExitCodes.SomeFilesFailedProcessing, exitCode);
         await processor.Received(1).ProcessAsync(@"C:\in\good.csv", Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task DownloadAndProcessingBothFail_ReportsDownloadFailure()
+    {
+        var downloader = Substitute.For<ISftpDownloader>();
+        downloader.DownloadNewFilesAsync(Arg.Any<CancellationToken>())
+            .Returns(new SftpDownloadResult([@"C:\in\bad.csv"], SkippedCount: 0, FailedCount: 1));
+        var processor = Substitute.For<IFileProcessor>();
+        processor.ProcessAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns<Task>(_ => throw new InvalidOperationException("corrupt"));
+
+        var exitCode = await CreateRunner(downloader, processor).RunAsync(CancellationToken.None);
+
+        Assert.Equal(ExitCodes.DownloadFailed, exitCode);
     }
 
     [Fact]

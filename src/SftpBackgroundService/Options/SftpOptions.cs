@@ -34,6 +34,7 @@ public sealed class SftpOptions
     public string RemoteDirectory { get; set; } = "/";
 
     /// <summary>Simple wildcard pattern matched against remote file names, e.g. "*.csv" or "report_*.xml".</summary>
+    [Required]
     public string FilePattern { get; set; } = "*";
 
     /// <summary>Folder that downloaded files land in.</summary>
@@ -46,5 +47,6 @@ public sealed class SftpOptions
     /// <summary>Delete the remote file after a successful download.</summary>
     public bool DeleteRemoteAfterDownload { get; set; }
 
+    [Range(1, 3600)]
     public int ConnectTimeoutSeconds { get; set; } = 30;
 }

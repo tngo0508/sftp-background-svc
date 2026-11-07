@@ -24,7 +24,7 @@ ISftpDownloader -> SftpDownloader (SSH.NET)
 IFileProcessor -> LoggingFileProcessor   <-- replace this with your real processing
   |  called once per downloaded file, in order, after the SFTP session has closed
   v
-exit code  (0 ok, 1 download failed, 2 some files failed processing, 3 startup/config error)
+exit code  (0 ok, 1 download failed, 2 some files failed processing, 3 startup/config error, 4 cancelled)
 ```
 
 | Folder | Contents |
@@ -59,8 +59,9 @@ by `appsettings.Production.json`, or by user-secrets during development.
 }
 ```
 
-Either `Password` or `PrivateKeyPath` is required. Bad or missing configuration is logged as Fatal and the
-process exits with code 3 before touching the network.
+Either `Password` or `PrivateKeyPath` is required. Bad or missing configuration (including an empty
+`FilePattern` or a `ConnectTimeoutSeconds` outside 1-3600) is logged as Fatal and the process exits with code 3
+before touching the network.
 
 Keep secrets out of `appsettings.json`:
 
@@ -142,7 +143,15 @@ Start-ScheduledTask -TaskName "SFTP Daily Download"
 (Get-ScheduledTaskInfo -TaskName "SFTP Daily Download").LastTaskResult
 ```
 
-`0` is success. Anything else maps to the exit codes above, and the log file has the details.
+`0` is success. Anything else maps to the exit codes above, and the log file has the details:
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Every new file was downloaded and processed. |
+| 1 | The connection or listing failed, or one or more files could not be downloaded. Files that did land were still processed; the failed ones are retried next run. |
+| 2 | Everything downloaded, but `IFileProcessor` threw for one or more files. |
+| 3 | Bad or missing configuration. Nothing was attempted. |
+| 4 | The run was cancelled (Ctrl+C). |
 
 **Updating:** overwrite the publish folder. Nothing is locked between runs, so no stop/start is needed.
 
@@ -171,6 +180,8 @@ even when the main configuration cannot load.
 
 - Files are downloaded to a `.staging` subfolder and moved into place atomically, so a crash mid-transfer never
   leaves a partial file in the download folder.
+- A failure on one file is logged and counted; the other files are still downloaded and processed, and the
+  failed file is retried on the next run. Its `.part` is removed, so `SkipIfLocalExists` never hides it.
 - `SkipIfLocalExists` is the only de-duplication. If you need to re-process, delete the local copy or set it
   to `false`.
 - Without `HostKeyFingerprint` the first server key is trusted and a warning is logged on every run.

@@ -83,7 +83,7 @@ $settings = New-ScheduledTaskSettingsSet `
 
 $registerArgs = @{
     TaskName    = $taskName
-    Description = 'Downloads new files from the SFTP server and processes them. Exit codes: 0 ok, 1 download failed, 2 some files failed processing, 3 startup/config error.'
+    Description = 'Downloads new files from the SFTP server and processes them. Exit codes: 0 ok, 1 download failed, 2 some files failed processing, 3 startup/config error, 4 cancelled.'
     Action      = $action
     Trigger     = $trigger
     Settings    = $settings
